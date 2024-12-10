@@ -3,6 +3,7 @@ import os
 import time
 import asyncio
 import re
+import json
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.constants import ChatMemberStatus
@@ -27,8 +28,8 @@ logging.getLogger('telegram.ext').setLevel(logging.WARNING)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('asyncio').setLevel(logging.WARNING)
 
-# Этапы регистрации
-NAME, YEAR, CITY, PURPOSE, CAR_TYPE = range(5)
+# Этапы регистрации (изменён порядок)
+NAME, CITY, CAR_TYPE, YEAR, PURPOSE = range(5)
 
 # Время ожидания регистрации и блокировок (в секундах)
 REGISTRATION_TIMEOUT = 120  # Время для регистрации
@@ -59,6 +60,14 @@ if not INVITE_LINK:
     logger.critical("INVITE_LINK не установлена. Добавьте INVITE_LINK в ваш .env файл.")
     exit(1)
 
+# Получение списка администраторов из .env
+ADMIN_IDS_ENV = os.getenv('ADMIN_IDS', '')
+ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_ENV.split(',') if admin_id.strip().isdigit()]
+
+if not ADMIN_IDS:
+    logger.critical("ADMIN_IDS не установлены или некорректны. Добавьте ADMIN_IDS в ваш .env файл.")
+    exit(1)
+
 # Список российских городов (пример, дополните по необходимости)
 RUSSIAN_CITIES = {
     "Москва", "Санкт-Петербург", "Новосибирск", "Екатеринбург", "Казань",
@@ -70,7 +79,7 @@ RUSSIAN_CITIES = {
 # Функция для проверки имени
 def is_valid_name(name: str) -> bool:
     """
-    Проверяет, что имя состоит из двух и более слов, состоящих только из букв.
+    Проверяет, что имя состоит из одного и более слов, состоящих только из букв.
     """
     parts = name.strip().split()
     if len(parts) < 1:
@@ -79,19 +88,6 @@ def is_valid_name(name: str) -> bool:
         if not re.fullmatch(r"[A-Za-zА-Яа-яЁё]+", part):
             return False
     return True
-
-# Функция для проверки года
-def is_valid_year(input_text: str) -> bool:
-    """
-    Проверяет, что ввод содержит год и слова "год" или "года".
-    Пример корректного ввода: "2020 год" или "2018 года".
-    """
-    match = re.fullmatch(r"(\d{4})\s*(год|года)", input_text.strip().lower())
-    if match:
-        year = int(match.group(1))
-        # Дополнительно можно проверить диапазон года
-        return 1990 <= year <= 2025
-    return False
 
 # Функция для проверки города
 def is_valid_city(city: str) -> bool:
@@ -186,6 +182,7 @@ async def handle_left_chat_member(update: Update, context: ContextTypes.DEFAULT_
     if user_id in registered_users:
         registered_users.pop(user_id, None)
         logger.info(f"Пользователь ID={user_id} удалён из registered_users.")
+        save_registered_users()  # Сохранение изменений
     else:
         logger.debug(f"Пользователь ID={user_id} покинул группу, но не был зарегистрирован.")
 
@@ -273,11 +270,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     # Отправляем приветственное сообщение и сохраняем message_id
-    await send_message_and_store_id(user_id, context, 'Добро пожаловать! Давайте начнём регистрацию.\n\nВопрос 1: Как вас зовут?')
+    await send_message_and_store_id(user_id, context, 'Добро пожаловать! Давайте начнём регистрацию.\n\nВопрос 1: Как вас зовут? (псевдоним)')
     logger.debug(f"Пользователь ID={user_id} получил вопрос 1.")
     return NAME
 
-# Обработчик Вопроса 1: Как вас зовут?
+# Обработчик Вопроса 1: Как вас зовут? (псевдоним)
 async def name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text
     user_id = update.message.from_user.id
@@ -290,41 +287,14 @@ async def name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Пользователь ID={user_id} ввёл некорректное имя: {name}")
         return NAME  # Повторный запрос
     context.user_data['name'] = name.strip()
-    await send_message_and_store_id(user_id, context, 'Вопрос 2: Какой год выпуска вашей машины?')
-    return YEAR
+    await send_message_and_store_id(user_id, context, 'Вопрос 2: Из какого вы города?')
+    return CITY
 
-# Обработчик Вопроса 2: Какой год выпуска вашей машины?
-async def year_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    year_input = update.message.text
-    user_id = update.message.from_user.id
-    logger.debug(f"Пользователь ID={user_id} ответил на Вопрос 2: {year_input}")
-
-    if not is_valid_year(year_input):
-        await update.message.reply_text(
-            "Пожалуйста, введите корректный год выпуска вашей машины, например, '2020 год' или '2018 года'."
-        )
-        logger.warning(f"Пользователь ID={user_id} ввёл некорректный год: {year_input}")
-        return YEAR  # Повторный запрос
-
-    # Извлечение года из ввода
-    match = re.fullmatch(r"(\d{4})\s*(год|года)", year_input.strip().lower())
-    if match:
-        year = int(match.group(1))
-        context.user_data['year'] = year
-        await send_message_and_store_id(user_id, context, 'Вопрос 3: Из какого вы города?')
-        return CITY
-
-    await update.message.reply_text(
-        "Пожалуйста, введите корректный год выпуска вашей машины, например, '2020 год' или '2018 года'."
-    )
-    logger.warning(f"Пользователь ID={user_id} ввёл некорректный формат года: {year_input}")
-    return YEAR
-
-# Обработчик Вопроса 3: Из какого вы города?
+# Обработчик Вопроса 2: Из какого вы города?
 async def city_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     city = update.message.text
     user_id = update.message.from_user.id
-    logger.debug(f"Пользователь ID={user_id} ответил на Вопрос 3: {city}")
+    logger.debug(f"Пользователь ID={user_id} ответил на Вопрос 2: {city}")
 
     if not is_valid_city(city):
         await update.message.reply_text(
@@ -334,24 +304,14 @@ async def city_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CITY  # Повторный запрос
 
     context.user_data['city'] = city.strip()
-    await send_message_and_store_id(user_id, context, 'Вопрос 4: Какова цель вашего участия?')
-    return PURPOSE
-
-# Обработчик Вопроса 4: Какова цель вашего участия?
-async def purpose_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    purpose = update.message.text
-    user_id = update.message.from_user.id
-    logger.debug(f"Пользователь ID={user_id} ответил на Вопрос 4: {purpose}")
-
-    context.user_data['purpose'] = purpose.strip()
-    await send_message_and_store_id(user_id, context, 'Вопрос 5: Какая у вас машина?')
+    await send_message_and_store_id(user_id, context, 'Вопрос 3: Какая у вас модель автомобиля?')
     return CAR_TYPE
 
-# Обработчик Вопроса 5: Какая у вас машина?
+# Обработчик Вопроса 3: Какая у вас модель автомобиля?
 async def car_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     car_type = update.message.text
     user_id = update.message.from_user.id
-    logger.debug(f"Пользователь ID={user_id} ответил на Вопрос 5: {car_type}")
+    logger.debug(f"Пользователь ID={user_id} ответил на Вопрос 3: {car_type}")
 
     if not is_valid_car_type(car_type):
         await update.message.reply_text(
@@ -360,15 +320,39 @@ async def car_type_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Пользователь ID={user_id} ввёл запрещённый тип машины: {car_type}")
         return CAR_TYPE  # Повторный запрос
 
+    context.user_data['car_type'] = car_type.strip()
+    await send_message_and_store_id(user_id, context, 'Вопрос 4: Какой год выпуска вашей машины?')
+    return YEAR
+
+# Обработчик Вопроса 4: Какой год выпуска вашей машины?
+async def year_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    year_input = update.message.text
+    user_id = update.message.from_user.id
+    logger.debug(f"Пользователь ID={user_id} ответил на Вопрос 4: {year_input}")
+
+    # Убрана проверка на корректность года
+    context.user_data['year'] = year_input.strip()
+    await send_message_and_store_id(user_id, context, 'Вопрос 5: Какова цель вашего визита?')
+    return PURPOSE
+
+# Обработчик Вопроса 5: Какова цель вашего визита?
+async def purpose_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    purpose = update.message.text
+    user_id = update.message.from_user.id
+    logger.debug(f"Пользователь ID={user_id} ответил на Вопрос 5: {purpose}")
+
+    context.user_data['purpose'] = purpose.strip()
     # Сохраняем данные пользователя
     registered_users[user_id] = {
         'name': context.user_data.get('name'),
-        'year': context.user_data.get('year'),
         'city': context.user_data.get('city'),
-        'purpose': context.user_data.get('purpose'),
-        'car_type': car_type.strip()
+        'car_type': context.user_data.get('car_type'),
+        'year': context.user_data.get('year'),
+        'purpose': context.user_data.get('purpose')
     }
     logger.info(f"Данные пользователя ID={user_id} сохранены в registered_users.")
+    
+    save_registered_users()  # Сохранение данных после регистрации
 
     # Удаляем из ожидающих регистрации
     group_id = pending_users.pop(user_id, None)
@@ -445,6 +429,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in registered_users:
         registered_users.pop(user_id, None)
         logger.debug(f"Пользователь ID={user_id} удалён из registered_users.")
+        save_registered_users()  # Сохранение изменений
 
     # Отменяем запланированную задачу бановки
     job_name = f"ban_user_if_not_registered_{user_id}"
@@ -464,11 +449,95 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
+# Обработчик команды /list_users для администраторов
+async def list_users_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    # Проверяем, является ли пользователь администратором
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("У вас нет прав для выполнения этой команды.")
+        logger.warning(f"Пользователь ID={user_id} попытался использовать /list_users без прав.")
+        return
+
+    if not registered_users:
+        await update.message.reply_text("Нет зарегистрированных пользователей.")
+        logger.info("Запрос списка пользователей, но список пуст.")
+        return
+
+    # Форматируем список пользователей
+    message_lines = ["**Список зарегистрированных пользователей:**\n"]
+    for uid, data in registered_users.items():
+        try:
+            user = await context.bot.get_chat(uid)
+            name = data.get('name', 'Не указано')
+            city = data.get('city', 'Не указано')
+            car_type = data.get('car_type', 'Не указано')
+            year = data.get('year', 'Не указано')
+            purpose = data.get('purpose', 'Не указано')
+
+            message_lines.append(
+                f"**Пользователь:** {user.full_name} (ID: {uid})\n"
+                f"• Имя (псевдоним): {name}\n"
+                f"• Город: {city}\n"
+                f"• Модель автомобиля: {car_type}\n"
+                f"• Год выпуска: {year}\n"
+                f"• Цель визита: {purpose}\n"
+                "-----"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка получения информации о пользователе ID={uid}: {e}")
+            message_lines.append(
+                f"**Пользователь ID={uid}:** Не удалось получить информацию.\n"
+                "-----"
+            )
+
+    message_text = "\n".join(message_lines)
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=message_text,
+            parse_mode='Markdown',
+            disable_web_page_preview=True
+        )
+        logger.info(f"Отправлен список пользователей администратору ID={user_id}.")
+    except Exception as e:
+        logger.error(f"Ошибка отправки списка пользователей администратору ID={user_id}: {e}")
+        await update.message.reply_text("Произошла ошибка при отправке списка пользователей.")
+
 # Обработка ошибок
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
 
+# Функция для сохранения данных о зарегистрированных пользователях в JSON
+def save_registered_users():
+    try:
+        with open('registered_users.json', 'w', encoding='utf-8') as f:
+            json.dump({str(k): v for k, v in registered_users.items()}, f, ensure_ascii=False, indent=4)
+        logger.info("Данные зарегистрированных пользователей сохранены.")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения зарегистрированных пользователей: {e}")
+
+# Функция для загрузки данных о зарегистрированных пользователях из JSON
+def load_registered_users():
+    global registered_users
+    if os.path.exists('registered_users.json'):
+        try:
+            with open('registered_users.json', 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # Преобразуем ключи обратно в int
+                registered_users = {int(k): v for k, v in data.items()}
+            logger.info("Данные зарегистрированных пользователей загружены.")
+        except json.JSONDecodeError:
+            logger.error("Ошибка декодирования JSON-файла с зарегистрированными пользователями.")
+            registered_users = {}
+    else:
+        registered_users = {}
+        logger.info("JSON-файл с зарегистрированными пользователями не найден. Создаётся новый.")
+
 def main():
+    load_registered_users()  # Загрузка данных о зарегистрированных пользователях
+
     BOT_TOKEN = os.getenv('BOT_TOKEN')  # Использование переменной окружения для токена
 
     if not BOT_TOKEN:
@@ -492,15 +561,19 @@ def main():
         entry_points=[CommandHandler('start', start)],
         states={
             NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_handler)],
-            YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, year_handler)],
             CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, city_handler)],
-            PURPOSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, purpose_handler)],
             CAR_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, car_type_handler)],
+            YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, year_handler)],
+            PURPOSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, purpose_handler)],
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
     application.add_handler(conv_handler)
+
+    # Обработчик команды /list_users для администраторов
+    list_users_command = CommandHandler('user', list_users_handler)
+    application.add_handler(list_users_command)
 
     # Обработчик ошибок
     application.add_error_handler(error_handler)
