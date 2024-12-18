@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Устанавливаем системные зависимости
+# Устанавливаем системные зависимости для сборки
 RUN apt-get update && apt-get install -y \
     libffi-dev \
     gcc \
@@ -15,8 +15,8 @@ WORKDIR /app
 # Копируем файлы проекта
 COPY . /app
 
-# Устанавливаем pip и обновляем его
-RUN pip install --no-cache-dir --upgrade pip
+# Обновляем pip
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Устанавливаем зависимости из requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
