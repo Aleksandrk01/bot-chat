@@ -65,8 +65,8 @@ ADMIN_IDS_ENV = os.getenv('ADMIN_IDS', '')
 ADMIN_IDS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_ENV.split(',') if admin_id.strip().isdigit()]
 
 if not ADMIN_IDS:
-    logger.critical("ADMIN_IDS не установлены или некорректны. Добавьте ADMIN_IDS в ваш .env файл.")
-    exit(1)
+    logger.warning("ADMIN_IDS не установлены или некорректны. Добавьте ADMIN_IDS в ваш .env файл, если хотите использовать глобальных администраторов.")
+    # Можно продолжить работу без глобальных администраторов
 
 # Список российских городов (пример, дополните по необходимости)
 RUSSIAN_CITIES = {
@@ -141,9 +141,9 @@ async def ban_user_if_not_registered(context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Пользователь ID={user_id} уже зарегистрирован. Бан не требуется.")
 
 # Функция для отправки сообщения и хранения message_id
-async def send_message_and_store_id(user_id, context, text):
+async def send_message_and_store_id(user_id, context, text, reply_markup=None):
     try:
-        message = await context.bot.send_message(chat_id=user_id, text=text)
+        message = await context.bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode='HTML')
         if user_id not in user_messages:
             user_messages[user_id] = []
         user_messages[user_id].append(message.message_id)
@@ -358,19 +358,40 @@ async def purpose_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = pending_users.pop(user_id, None)
     logger.debug(f"Пользователь ID={user_id} удалён из pending_users.")
 
-    # Отправляем сообщение с правилами
-    await send_message_and_store_id(user_id, context, 'Спасибо за регистрацию! Теперь вы можете отправлять сообщения в группе.\n\n**Правила чата:**\n' + CHAT_RULES)
-    logger.info(f"Пользователь ID={user_id} зарегистрирован и получил правила чата.")
+    # Отправляем сообщение с правилами и ссылкой-приглашением
+    keyboard = [
+        [InlineKeyboardButton("📢 Перейти в чат", url=INVITE_LINK)]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Отменяем запланированную задачу бановки, если она ещё не выполнена
-    job_name = f"ban_user_if_not_registered_{user_id}"
-    current_jobs = context.job_queue.get_jobs_by_name(job_name)
-    if current_jobs:
-        for job in current_jobs:
-            job.schedule_removal()
-            logger.debug(f"Запланированная задача бановки пользователя ID={user_id} отменена.")
-    else:
-        logger.warning(f"Запланированные задачи бановки для пользователя ID={user_id} не найдены.")
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"Спасибо за регистрацию! Теперь вы можете отправлять сообщения в группе.\n\n**Правила чата:**\n{CHAT_RULES}",
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+        logger.info(f"Отправлено сообщение с правилами и приглашением пользователю ID={user_id}.")
+    except Exception as e:
+        logger.error(f"Ошибка отправки личного сообщения пользователю ID={user_id}: {e}")
+        # Если не удалось отправить в личные сообщения, отправляем в группу
+        if group_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=group_id,
+                    text=f"Пользователь <a href='tg://user?id={user_id}'>{context.user_data.get('name')}</a> успешно зарегистрирован и теперь может отправлять сообщения.",
+                    parse_mode='HTML'
+                )
+                # Также можно добавить кнопку с приглашением
+                await context.bot.send_message(
+                    chat_id=group_id,
+                    text="Если вы хотите проверить свои настройки или повторно присоединиться, используйте кнопку ниже.",
+                    reply_markup=reply_markup,
+                    parse_mode='HTML'
+                )
+                logger.info(f"Отправлено сообщение с приглашением в группу для пользователя ID={user_id}.")
+            except Exception as ex:
+                logger.error(f"Ошибка отправки сообщения в группу для пользователя ID={user_id}: {ex}")
 
     # Снимаем ограничения с пользователя
     if group_id:
@@ -400,11 +421,23 @@ async def purpose_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"Спасибо за регистрацию! Вы можете вернуться в группу по ссылке: {INVITE_LINK}"
+                text=f"Спасибо за регистрацию! Вы можете вернуться в группу по ссылке: {INVITE_LINK}",
+                parse_mode='HTML'
             )
             logger.info(f"Отправлено приглашение пользователю ID={user_id} в группу.")
         except Exception as e:
             logger.error(f"Ошибка отправки приглашения пользователю ID={user_id}: {e}")
+            # Попробуем отправить в группу
+            try:
+                await context.bot.send_message(
+                    chat_id=group_id,
+                    text=f"Пользователь <a href='tg://user?id={user_id}'>{context.user_data.get('name')}</a>, пожалуйста, используйте ссылку ниже для повторного присоединения к чату.",
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                logger.info(f"Отправлено приглашение в группу для пользователя ID={user_id}.")
+            except Exception as ex:
+                logger.error(f"Ошибка отправки приглашения в группу для пользователя ID={user_id}: {ex}")
     else:
         logger.error(f"Неизвестный group_id для пользователя ID={user_id}.")
 
@@ -450,61 +483,75 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # Обработчик команды /list_users для администраторов
+# Обработчик команды /list_users для администраторов группы
 async def list_users_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
 
-    # Проверяем, является ли пользователь администратором
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("У вас нет прав для выполнения этой команды.")
-        logger.warning(f"Пользователь ID={user_id} попытался использовать /list_users без прав.")
+    # Проверяем, была ли команда отправлена в личных сообщениях
+    if chat_id != user_id:
+        await update.message.reply_text("Эту команду можно использовать только в личных сообщениях боту.")
+        logger.warning(f"Пользователь ID={user_id} попытался использовать /list_users в чате ID={chat_id}.")
         return
-
-    if not registered_users:
-        await update.message.reply_text("Нет зарегистрированных пользователей.")
-        logger.info("Запрос списка пользователей, но список пуст.")
-        return
-
-    # Форматируем список пользователей
-    message_lines = ["**Список зарегистрированных пользователей:**\n"]
-    for uid, data in registered_users.items():
-        try:
-            user = await context.bot.get_chat(uid)
-            name = data.get('name', 'Не указано')
-            city = data.get('city', 'Не указано')
-            car_type = data.get('car_type', 'Не указано')
-            year = data.get('year', 'Не указано')
-            purpose = data.get('purpose', 'Не указано')
-
-            message_lines.append(
-                f"**Пользователь:** {user.full_name} (ID: {uid})\n"
-                f"• Имя (псевдоним): {name}\n"
-                f"• Город: {city}\n"
-                f"• Модель автомобиля: {car_type}\n"
-                f"• Год выпуска: {year}\n"
-                f"• Цель визита: {purpose}\n"
-                "-----"
-            )
-        except Exception as e:
-            logger.error(f"Ошибка получения информации о пользователе ID={uid}: {e}")
-            message_lines.append(
-                f"**Пользователь ID={uid}:** Не удалось получить информацию.\n"
-                "-----"
-            )
-
-    message_text = "\n".join(message_lines)
 
     try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=message_text,
-            parse_mode='Markdown',
-            disable_web_page_preview=True
-        )
-        logger.info(f"Отправлен список пользователей администратору ID={user_id}.")
-    except Exception as e:
-        logger.error(f"Ошибка отправки списка пользователей администратору ID={user_id}: {e}")
-        await update.message.reply_text("Произошла ошибка при отправке списка пользователей.")
+        # Проверяем, является ли пользователь администратором указанной группы
+        admins = await context.bot.get_chat_administrators(int(os.getenv('GROUP_ID')))
+        admin_ids = {admin.user.id for admin in admins}
 
+        if user_id not in admin_ids:
+            await update.message.reply_text("У вас нет прав для выполнения этой команды. Только администраторы группы могут использовать её.")
+            logger.warning(f"Пользователь ID={user_id} попытался использовать /list_users без прав.")
+            return
+
+        if not registered_users:
+            await update.message.reply_text("Нет зарегистрированных пользователей.")
+            logger.info("Запрос списка пользователей, но список пуст.")
+            return
+
+        # Форматируем список пользователей
+        message_lines = ["**Список зарегистрированных пользователей:**\n"]
+        for uid, data in registered_users.items():
+            try:
+                user = await context.bot.get_chat(uid)
+                name = data.get('name', 'Не указано')
+                city = data.get('city', 'Не указано')
+                car_type = data.get('car_type', 'Не указано')
+                year = data.get('year', 'Не указано')
+                purpose = data.get('purpose', 'Не указано')
+
+                message_lines.append(
+                    f"**Пользователь:** {user.full_name} (ID: {uid})\n"
+                    f"• Имя (псевдоним): {name}\n"
+                    f"• Город: {city}\n"
+                    f"• Модель автомобиля: {car_type}\n"
+                    f"• Год выпуска: {year}\n"
+                    f"• Цель визита: {purpose}\n"
+                    "-----"
+                )
+            except Exception as e:
+                logger.error(f"Ошибка получения информации о пользователе ID={uid}: {e}")
+                message_lines.append(
+                    f"**Пользователь ID={uid}:** Не удалось получить информацию.\n"
+                    "-----"
+                )
+
+        message_text = "\n".join(message_lines)
+
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=message_text,
+                parse_mode='Markdown',
+                disable_web_page_preview=True
+            )
+            logger.info(f"Отправлен список пользователей администратору ID={user_id}.")
+        except Exception as e:
+            logger.error(f"Ошибка отправки списка пользователей администратору ID={user_id}: {e}")
+            await update.message.reply_text("Произошла ошибка при отправке списка пользователей.")
+    except Exception as e:
+        logger.error(f"Ошибка проверки администратора группы: {e}")
+        await update.message.reply_text("Произошла ошибка при проверке администратора группы.")
 # Обработка ошибок
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(msg="Exception while handling an update:", exc_info=context.error)
@@ -530,6 +577,9 @@ def load_registered_users():
             logger.info("Данные зарегистрированных пользователей загружены.")
         except json.JSONDecodeError:
             logger.error("Ошибка декодирования JSON-файла с зарегистрированными пользователями.")
+            registered_users = {}
+        except Exception as e:
+            logger.error(f"Ошибка загрузки зарегистрированных пользователей: {e}")
             registered_users = {}
     else:
         registered_users = {}
@@ -572,7 +622,7 @@ def main():
     application.add_handler(conv_handler)
 
     # Обработчик команды /list_users для администраторов
-    list_users_command = CommandHandler('user', list_users_handler)
+    list_users_command = CommandHandler('list_users', list_users_handler)
     application.add_handler(list_users_command)
 
     # Обработчик ошибок
